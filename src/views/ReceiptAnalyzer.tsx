@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { Download, Loader2, Trash2, Save, Edit2, CheckCircle2, AlertCircle, X } from "lucide-react";
 
@@ -111,6 +111,15 @@ const downloadCSV = (entries: HistoryEntry[]) => {
   URL.revokeObjectURL(url);
 };
 
+const FIELD_ORDER: Array<keyof ReceiptFields> = [
+  "usageDate",
+  "usageItem",
+  "usageDescription",
+  "usagePlace",
+  "usageAmount",
+  "notes",
+];
+
 const defaultFields: ReceiptFields = {
   usageDate: "",
   usageItem: "",
@@ -141,6 +150,10 @@ const ReceiptAnalyzer = () => {
   });
   const [bulkSummary, setBulkSummary] = useState<BulkSummary | null>(null);
   const [pendingAction, setPendingAction] = useState<"single" | "bulk" | null>(null);
+  const analyzedPreviewsRef = useRef<Map<string, string>>(new Map());
+  const [analysisPreview, setAnalysisPreview] = useState<string | null>(null);
+  const [previewHeight, setPreviewHeight] = useState(320);
+  const lastFocusedEntryRef = useRef<string | null>(null);
 
   const geminiKey = getGeminiKey();
 
@@ -148,6 +161,27 @@ const ReceiptAnalyzer = () => {
     activeFileIndex !== null && activeFileIndex < selectedFiles.length
       ? selectedFiles[activeFileIndex]!
       : selectedFiles[0] ?? null;
+  const activePreview = preview ?? analysisPreview;
+  const normalizeField = (value: unknown) => (value ?? "").toString().trim();
+  const changedFields = useMemo(() => {
+    if (!analysis || !currentEntryId) {
+      return new Set<keyof ReceiptFields>();
+    }
+    const keys = Object.keys(form) as Array<keyof ReceiptFields>;
+    return new Set(
+      keys.filter((key) => normalizeField(form[key]) !== normalizeField(analysis[key])),
+    );
+  }, [analysis, currentEntryId, form]);
+  const isFieldChanged = (key: keyof ReceiptFields) => changedFields.has(key);
+  const previewSourceHint = useMemo(() => {
+    if (preview && currentFile) {
+      return `Previewing ${currentFile.name}`;
+    }
+    if (analysisPreview && currentEntryId) {
+      return "Preview from analyzed history";
+    }
+    return null;
+  }, [analysisPreview, currentEntryId, currentFile, preview]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -214,6 +248,29 @@ const ReceiptAnalyzer = () => {
 
     void restoreVerification();
   }, [geminiKey]);
+
+  useEffect(() => {
+    if (!analysis || !currentEntryId) {
+      return;
+    }
+    if (lastFocusedEntryRef.current === currentEntryId) {
+      return;
+    }
+    lastFocusedEntryRef.current = currentEntryId;
+
+    const nextKey = FIELD_ORDER.find((key) => {
+      const value = form[key];
+      return (value ?? "").toString().trim() === "";
+    });
+    if (!nextKey) {
+      return;
+    }
+
+    const target = document.getElementById(`receipt-field-${nextKey}`);
+    if (target instanceof HTMLElement) {
+      target.focus();
+    }
+  }, [analysis, currentEntryId, form]);
 
   const shortBase = useMemo(() => {
     if (typeof window === "undefined") {
@@ -346,7 +403,10 @@ const ReceiptAnalyzer = () => {
 
     setHistory((prev) => [entry, ...prev]);
 
-    return { entry, result };
+    const previewUrl = `data:${imagePayload.mimeType};base64,${imagePayload.data}`;
+    analyzedPreviewsRef.current.set(entry.id, previewUrl);
+
+    return { entry, result, previewUrl };
   };
 
   const runSingleAnalysis = async () => {
@@ -361,7 +421,9 @@ const ReceiptAnalyzer = () => {
     setBulkSummary(null);
 
     try {
-      const { entry, result } = await analyzeFile(file);
+      const { entry, result, previewUrl } = await analyzeFile(file);
+      lastFocusedEntryRef.current = null;
+      setAnalysisPreview(previewUrl);
       setAnalysis(result);
       setForm(result);
       setCurrentEntryId(entry.id);
@@ -398,7 +460,7 @@ const ReceiptAnalyzer = () => {
     const failures: Array<{ file: string; message: string }> = [];
     let successes = 0;
     let processed = 0;
-    let firstSuccess: { entry: HistoryEntry; result: ReceiptFields } | null = null;
+    let firstSuccess: { entry: HistoryEntry; result: ReceiptFields; previewUrl: string } | null = null;
 
     for (const file of files) {
       try {
@@ -419,9 +481,11 @@ const ReceiptAnalyzer = () => {
     setBulkSummary({ succeeded: successes, failed: failures.length, errors: failures });
 
     if (firstSuccess) {
+      lastFocusedEntryRef.current = null;
       setAnalysis(firstSuccess.result);
       setForm(firstSuccess.result);
       setCurrentEntryId(firstSuccess.entry.id);
+      setAnalysisPreview(firstSuccess.previewUrl);
     }
 
     clearSelectedFiles();
@@ -471,18 +535,24 @@ const ReceiptAnalyzer = () => {
     if (!window.confirm("Delete the selected analysis entry?")) {
       return;
     }
+    analyzedPreviewsRef.current.delete(id);
     setHistory((prev) => prev.filter((entry) => entry.id !== id));
     if (currentEntryId === id) {
+      lastFocusedEntryRef.current = null;
       setCurrentEntryId(null);
       setAnalysis(null);
       setForm(defaultFields);
+      setAnalysisPreview(null);
     }
   };
 
   const handleLoadEntry = (entry: HistoryEntry) => {
+    lastFocusedEntryRef.current = null;
+    const storedPreview = analyzedPreviewsRef.current.get(entry.id) ?? null;
     setAnalysis(entry);
     setForm(entry);
     setCurrentEntryId(entry.id);
+    setAnalysisPreview(storedPreview);
     clearSelectedFiles();
     setIsKeyVerified(true);
   };
@@ -597,206 +667,353 @@ const ReceiptAnalyzer = () => {
           </p>
         </header>
 
-        <form className="grid gap-4 rounded-3xl border border-border/70 bg-slate-900/60 p-6 shadow-subtle" onSubmit={handleAnalyze}>
-          <label className="space-y-2 text-sm font-medium text-slate-200">
-            Attach receipt images (multiple files supported)
-            <input
-              multiple
-              type="file"
-              accept="image/*"
-              onChange={attachFiles}
-              className="w-full rounded-2xl border border-border/60 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 shadow-inner file:mr-4 file:rounded-full file:border-0 file:bg-indigo-500 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-            />
-          </label>
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1.35fr)]">
+          <form
+            className="flex flex-col gap-4 rounded-3xl border border-border/70 bg-slate-900/60 p-6 shadow-subtle"
+            onSubmit={handleAnalyze}
+          >
+            <label className="space-y-2 text-sm font-medium text-slate-200">
+              Attach receipt images (multiple files supported)
+              <input
+                multiple
+                type="file"
+                accept="image/*"
+                onChange={attachFiles}
+                className="w-full rounded-2xl border border-border/60 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 shadow-inner file:mr-4 file:rounded-full file:border-0 file:bg-indigo-500 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+              />
+            </label>
 
-          {selectedFiles.length > 0 && (
-            <div className="rounded-2xl border border-border/60 bg-slate-950/60 p-4 text-sm text-slate-200 shadow-inner">
+            {selectedFiles.length > 0 && (
+              <div className="rounded-2xl border border-border/60 bg-slate-950/60 p-4 text-sm text-slate-200 shadow-inner">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-semibold text-slate-100">Selected receipts</p>
+                  <button
+                    type="button"
+                    onClick={clearSelectedFiles}
+                    className="inline-flex items-center gap-1 rounded-full border border-border/50 px-3 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60"
+                  >
+                    Clear all
+                  </button>
+                </div>
+                <ul className="mt-3 grid gap-2">
+                  {selectedFiles.map((file, index) => {
+                    const isActive =
+                      currentFile?.name === file.name &&
+                      currentFile?.size === file.size &&
+                      currentFile?.lastModified === file.lastModified;
+                    return (
+                      <li
+                        key={`${file.name}-${file.lastModified}-${file.size}`}
+                        className={cn(
+                          "flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-slate-900/60 px-3 py-2",
+                          isActive ? "border-indigo-400/70" : "",
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSelectActiveFile(index)}
+                          className="flex flex-1 flex-col items-start text-left text-xs text-slate-300"
+                        >
+                          <span className="font-semibold text-slate-100">{file.name}</span>
+                          <span className="text-[0.7rem] text-slate-500">
+                            {formatBytes(file.size)} | {new Date(file.lastModified).toLocaleDateString()}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveSelectedFile(index)}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-border/60 text-slate-300 transition hover:bg-slate-800/60"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="submit"
+                disabled={pending || bulkPending || !currentFile}
+                className="inline-flex h-11 items-center justify-center rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-6 text-sm font-semibold text-white shadow-glow transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {pending ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Analyzing receipt...
+                  </>
+                ) : (
+                  "Analyze selected"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={handleAnalyzeAll}
+                disabled={bulkPending || selectedFiles.length === 0}
+                className="inline-flex h-11 items-center justify-center rounded-full border border-indigo-400/60 px-6 text-sm font-semibold text-indigo-100 transition hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {bulkPending ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Bulk processing... ({bulkProgress.completed}/{bulkProgress.total})
+                  </>
+                ) : (
+                  `Bulk process (${selectedFiles.length})`
+                )}
+              </button>
+            </div>
+
+            {error && (
+              <div className="rounded-2xl border border-warning/40 bg-warning/10 px-5 py-4 text-sm font-medium text-warning-foreground shadow-subtle">
+                {error}
+              </div>
+            )}
+
+            {bulkSummary && (
+              <div className="rounded-2xl border border-border/60 bg-slate-900/60 px-5 py-4 text-sm text-slate-200 shadow-subtle">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  {bulkSummary.failed === 0 ? (
+                    <CheckCircle2 className="h-4 w-4 text-success" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 text-warning" />
+                  )}
+                  <span>
+                    {bulkSummary.succeeded} succeeded | {bulkSummary.failed} failed
+                  </span>
+                </div>
+                {bulkSummary.failed > 0 && (
+                  <ul className="mt-3 space-y-1 text-xs text-slate-400">
+                    {bulkSummary.errors.map((failure) => (
+                      <li key={`${failure.file}-${failure.message}`}>
+                        {failure.file}: {failure.message}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </form>
+
+          <div className="flex flex-col gap-4 lg:gap-6">
+            <div className="rounded-3xl border border-border/70 bg-slate-900/60 p-5 shadow-subtle lg:sticky lg:top-6">
               <div className="flex items-center justify-between gap-3">
-                <p className="font-semibold text-slate-100">Selected receipts</p>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">Receipt preview</h3>
+                  <p className="text-xs text-slate-500">
+                    {previewSourceHint ??
+                      "Attach a receipt or load an entry to keep the image beside the extracted fields."}
+                  </p>
+                </div>
+                {activePreview && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (typeof window !== "undefined") {
+                        window.open(activePreview, "_blank", "noopener,noreferrer");
+                      }
+                    }}
+                    className="inline-flex h-8 items-center justify-center rounded-full border border-border/60 px-3 text-xs font-semibold text-slate-200 transition hover:bg-slate-900/60"
+                  >
+                    View full size
+                  </button>
+                )}
+              </div>
+              {activePreview ? (
+                <>
+                  <div className="mt-4 overflow-hidden rounded-2xl border border-border/60 bg-slate-950/60">
+                    <div className="flex justify-center bg-slate-950/30">
+                      <img
+                        src={activePreview}
+                        alt={currentFile?.name ?? "receipt preview"}
+                        className="h-auto w-full origin-top object-contain transition-all"
+                        style={{ maxHeight: `${previewHeight}px` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-4 space-y-1">
+                    <label className="flex items-center justify-between text-[0.7rem] uppercase tracking-widest text-slate-500">
+                      Zoom
+                      <span className="font-semibold text-slate-300">
+                        {Math.round((previewHeight / 320) * 100)}%
+                      </span>
+                    </label>
+                    <input
+                      type="range"
+                      min={240}
+                      max={720}
+                      step={40}
+                      value={previewHeight}
+                      onChange={(event) => setPreviewHeight(Number(event.target.value))}
+                      className="w-full accent-indigo-400"
+                    />
+                  </div>
+                </>
+              ) : (
+                <p className="mt-4 rounded-2xl border border-dashed border-border/60 bg-slate-950/40 px-4 py-6 text-center text-xs text-slate-400">
+                  Attach a receipt or load one from history to preview it here. For older entries, re-attach the image if you need to confirm the details.
+                </p>
+              )}
+            </div>
+
+            {(analysis || currentEntryId) && (
+              <div className="rounded-3xl border border-border/70 bg-slate-900/60 p-6 shadow-subtle">
+                <h3 className="text-lg font-semibold text-slate-100">Analyzed fields (editable)</h3>
+                <p className="mt-1 text-xs text-slate-400">
+                  Keep the preview in sight while you review and clean up the extracted values.
+                </p>
+                {changedFields.size > 0 && (
+                  <div className="mt-4 rounded-2xl border border-indigo-400/30 bg-indigo-500/10 px-4 py-3 text-xs text-indigo-100">
+                    {changedFields.size} field{changedFields.size > 1 ? "s" : ""} edited. Save to update the history.
+                  </div>
+                )}
+                <div className="mt-4 grid gap-3 text-sm text-slate-200 sm:grid-cols-2">
+                  <label className="flex flex-col gap-1">
+                    <span className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
+                      <span>Usage date</span>
+                      {isFieldChanged("usageDate") && (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[0.6rem] font-semibold text-indigo-200">
+                          Edited
+                        </span>
+                      )}
+                    </span>
+                    <input
+                      id="receipt-field-usageDate"
+                      value={form.usageDate}
+                      onChange={(event) => handleFieldChange("usageDate", event.target.value)}
+                      placeholder="e.g. 2025-05-01"
+                      className={cn(
+                        "rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40",
+                        isFieldChanged("usageDate")
+                          ? "border-indigo-400/70 bg-indigo-500/10 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+                          : "",
+                      )}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
+                      <span>Item</span>
+                      {isFieldChanged("usageItem") && (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[0.6rem] font-semibold text-indigo-200">
+                          Edited
+                        </span>
+                      )}
+                    </span>
+                    <input
+                      id="receipt-field-usageItem"
+                      value={form.usageItem}
+                      onChange={(event) => handleFieldChange("usageItem", event.target.value)}
+                      placeholder="e.g. Latte"
+                      className={cn(
+                        "rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40",
+                        isFieldChanged("usageItem")
+                          ? "border-indigo-400/70 bg-indigo-500/10 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+                          : "",
+                      )}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 sm:col-span-2">
+                    <span className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
+                      <span>Description</span>
+                      {isFieldChanged("usageDescription") && (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[0.6rem] font-semibold text-indigo-200">
+                          Edited
+                        </span>
+                      )}
+                    </span>
+                    <textarea
+                      id="receipt-field-usageDescription"
+                      value={form.usageDescription}
+                      onChange={(event) => handleFieldChange("usageDescription", event.target.value)}
+                      placeholder="Add memo or important line items."
+                      className={cn(
+                        "rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-indigo-500/40",
+                        isFieldChanged("usageDescription")
+                          ? "border-indigo-400/70 bg-indigo-500/10 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+                          : "",
+                      )}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
+                      <span>Merchant</span>
+                      {isFieldChanged("usagePlace") && (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[0.6rem] font-semibold text-indigo-200">
+                          Edited
+                        </span>
+                      )}
+                    </span>
+                    <input
+                      id="receipt-field-usagePlace"
+                      value={form.usagePlace}
+                      onChange={(event) => handleFieldChange("usagePlace", event.target.value)}
+                      placeholder="e.g. Kkomentle Cafe"
+                      className={cn(
+                        "rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40",
+                        isFieldChanged("usagePlace")
+                          ? "border-indigo-400/70 bg-indigo-500/10 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+                          : "",
+                      )}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
+                      <span>Amount</span>
+                      {isFieldChanged("usageAmount") && (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[0.6rem] font-semibold text-indigo-200">
+                          Edited
+                        </span>
+                      )}
+                    </span>
+                    <input
+                      id="receipt-field-usageAmount"
+                      value={form.usageAmount}
+                      onChange={(event) => handleFieldChange("usageAmount", event.target.value)}
+                      placeholder="e.g. 32,000 KRW"
+                      className={cn(
+                        "rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40",
+                        isFieldChanged("usageAmount")
+                          ? "border-indigo-400/70 bg-indigo-500/10 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+                          : "",
+                      )}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 sm:col-span-2">
+                    <span className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
+                      <span>Notes</span>
+                      {isFieldChanged("notes") && (
+                        <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[0.6rem] font-semibold text-indigo-200">
+                          Edited
+                        </span>
+                      )}
+                    </span>
+                    <textarea
+                      id="receipt-field-notes"
+                      value={form.notes ?? ""}
+                      onChange={(event) => handleFieldChange("notes", event.target.value)}
+                      placeholder="Add card info, VAT, or other notes."
+                      className={cn(
+                        "rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-indigo-500/40",
+                        isFieldChanged("notes")
+                          ? "border-indigo-400/70 bg-indigo-500/10 shadow-[0_0_0_1px_rgba(129,140,248,0.35)]"
+                          : "",
+                      )}
+                    />
+                  </label>
+                </div>
                 <button
                   type="button"
-                  onClick={clearSelectedFiles}
-                  className="inline-flex items-center gap-1 rounded-full border border-border/50 px-3 py-1 text-xs text-slate-300 transition hover:bg-slate-800/60"
+                  onClick={handleSaveEdits}
+                  disabled={!currentEntryId || changedFields.size === 0}
+                  className="mt-4 inline-flex h-10 items-center justify-center rounded-full border border-border/60 bg-transparent px-4 text-xs font-semibold text-slate-200 transition hover:bg-slate-900/60 disabled:pointer-events-none disabled:opacity-60"
                 >
-                  Clear all
+                  <Save className="mr-2 h-4 w-4" /> Save changes
                 </button>
               </div>
-              <ul className="mt-3 grid gap-2">
-                {selectedFiles.map((file, index) => {
-                  const isActive =
-                    currentFile?.name === file.name &&
-                    currentFile?.size === file.size &&
-                    currentFile?.lastModified === file.lastModified;
-                  return (
-                    <li
-                      key={`${file.name}-${file.lastModified}-${file.size}`}
-                      className={cn(
-                        "flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-slate-900/60 px-3 py-2",
-                        isActive ? "border-indigo-400/70" : "",
-                      )}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => handleSelectActiveFile(index)}
-                        className="flex flex-1 flex-col items-start text-left text-xs text-slate-300"
-                      >
-                        <span className="font-semibold text-slate-100">{file.name}</span>
-                        <span className="text-[0.7rem] text-slate-500">
-                          {formatBytes(file.size)} · {new Date(file.lastModified).toLocaleDateString()}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveSelectedFile(index)}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-border/60 text-slate-300 transition hover:bg-slate-800/60"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
-
-          {preview && (
-            <div className="overflow-hidden rounded-2xl border border-border/60 bg-slate-900/60">
-              <img src={preview} alt={currentFile?.name ?? "receipt preview"} className="max-h-64 w-full object-contain" />
-            </div>
-          )}
-
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="submit"
-              disabled={pending || bulkPending || !currentFile}
-              className="inline-flex h-11 items-center justify-center rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-6 text-sm font-semibold text-white shadow-glow transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {pending ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Analyzing receipt...
-                </>
-              ) : (
-                "Analyze selected"
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={handleAnalyzeAll}
-              disabled={bulkPending || selectedFiles.length === 0}
-              className="inline-flex h-11 items-center justify-center rounded-full border border-indigo-400/60 px-6 text-sm font-semibold text-indigo-100 transition hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {bulkPending ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Bulk processing... ({bulkProgress.completed}/{bulkProgress.total})
-                </>
-              ) : (
-                `Bulk process (${selectedFiles.length})`
-              )}
-            </button>
-          </div>
-        </form>
-        {error && (
-          <div className="rounded-2xl border border-warning/40 bg-warning/10 px-5 py-4 text-sm font-medium text-warning-foreground shadow-subtle">
-            {error}
-          </div>
-        )}
-
-        {bulkSummary && (
-          <div className="rounded-2xl border border-border/60 bg-slate-900/60 px-5 py-4 text-sm text-slate-200 shadow-subtle">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              {bulkSummary.failed === 0 ? (
-                <CheckCircle2 className="h-4 w-4 text-success" />
-              ) : (
-                <AlertCircle className="h-4 w-4 text-warning" />
-              )}
-              <span>
-                {bulkSummary.succeeded} succeeded · {bulkSummary.failed} failed
-              </span>
-            </div>
-            {bulkSummary.failed > 0 && (
-              <ul className="mt-3 space-y-1 text-xs text-slate-400">
-                {bulkSummary.errors.map((failure) => (
-                  <li key={`${failure.file}-${failure.message}`}>
-                    {failure.file}: {failure.message}
-                  </li>
-                ))}
-              </ul>
             )}
           </div>
-        )}
-
-        {(analysis || currentEntryId) && (
-          <div className="rounded-3xl border border-border/70 bg-slate-900/60 p-6 shadow-subtle">
-            <h3 className="text-lg font-semibold text-slate-100">Analysis result (editable)</h3>
-            <div className="mt-4 grid gap-3 text-sm text-slate-200 sm:grid-cols-2">
-              <label className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-widest text-slate-400">Usage date</span>
-                <input
-                  value={form.usageDate}
-                  onChange={(event) => handleFieldChange("usageDate", event.target.value)}
-                  placeholder="e.g. 2025-05-01"
-                  className="rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-widest text-slate-400">Item</span>
-                <input
-                  value={form.usageItem}
-                  onChange={(event) => handleFieldChange("usageItem", event.target.value)}
-                  placeholder="e.g. Latte"
-                  className="rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                />
-              </label>
-              <label className="flex flex-col gap-1 sm:col-span-2">
-                <span className="text-xs uppercase tracking-widest text-slate-400">Description</span>
-                <textarea
-                  value={form.usageDescription}
-                  onChange={(event) => handleFieldChange("usageDescription", event.target.value)}
-                  placeholder="Add memo or important line items."
-                  className="rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-indigo-500/40"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-widest text-slate-400">Merchant</span>
-                <input
-                  value={form.usagePlace}
-                  onChange={(event) => handleFieldChange("usagePlace", event.target.value)}
-                  placeholder="e.g. Kkomentle Cafe"
-                  className="rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-indigo-500/40"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-widest text-slate-400">Amount</span>
-                <input
-                  value={form.usageAmount}
-                  onChange={(event) => handleFieldChange("usageAmount", event.target.value)}
-                  placeholder="e.g. 32,000 KRW"
-                  className="rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-indigo-500/40"
-                />
-              </label>
-              <label className="flex flex-col gap-1 sm:col-span-2">
-                <span className="text-xs uppercase tracking-widest text-slate-400">Notes</span>
-                <textarea
-                  value={form.notes ?? ""}
-                  onChange={(event) => handleFieldChange("notes", event.target.value)}
-                  placeholder="Add card info, VAT, or other notes."
-                  className="rounded-xl border border-border/60 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none focus:ring-indigo-500/40"
-                />
-              </label>
-            </div>
-            <button
-              type="button"
-              onClick={handleSaveEdits}
-              disabled={!currentEntryId}
-              className="mt-4 inline-flex h-10 items-center justify-center rounded-full border border-border/60 bg-transparent px-4 text-xs font-semibold text-slate-200 transition hover:bg-slate-900/60 disabled:pointer-events-none disabled:opacity-60"
-            >
-              <Save className="mr-2 h-4 w-4" /> Save changes
-            </button>
-          </div>
-        )}
-
+        </div>
         <div className="rounded-3xl border border-border/80 bg-slate-900/60 p-6 shadow-subtle">
           <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -873,3 +1090,7 @@ const ReceiptAnalyzer = () => {
 };
 
 export default ReceiptAnalyzer;
+
+
+
+
