@@ -439,7 +439,7 @@ const GameView = () => {
                   value={inputValue}
                   onChange={(event) => setInputValue(event.target.value)}
                   placeholder="예: 은하수"
-                  disabled={status === 'cleared'}
+                  disabled={status === 'cleared' || (gameMode === 'daily' && isDailySolved)}
                   className="w-full rounded-2xl border border-border/60 bg-slate-900/60 px-4 py-3 text-base text-slate-100 shadow-inner transition placeholder:text-slate-500 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </label>
@@ -448,7 +448,7 @@ const GameView = () => {
                 <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
                   <button
                     type="submit"
-                    disabled={status === 'cleared'}
+                    disabled={status === 'cleared' || (gameMode === 'daily' && isDailySolved)}
                     className="inline-flex h-11 flex-1 items-center justify-center rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-6 text-sm font-semibold text-white shadow-glow transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 disabled:cursor-not-allowed disabled:opacity-60 sm:flex-none"
                   >
                     제출하기
@@ -471,6 +471,12 @@ const GameView = () => {
                 )}
               </div>
             </form>
+
+            {gameMode === 'daily' && isDailySolved && status !== 'cleared' && (
+              <div className="rounded-2xl border border-success/40 bg-success/10 px-5 py-4 text-sm font-medium text-success-foreground shadow-subtle">
+                오늘의 문제를 이미 완료했습니다! 내일 다시 도전하거나 무한 모드로 전환해 보세요.
+              </div>
+            )}
 
             {feedback && (
               <div
