@@ -44,7 +44,6 @@ type PlayerStats = {
   lastReset: string;
 };
 
-const MAX_HINT_LEVEL = 3;
 const SOLVED_STORAGE_KEY = 'kkomaentle-conquered-terms';
 const STATS_STORAGE_KEY = 'kkomaentle-stats';
 const MODE_STORAGE_KEY = 'kkomaentle-mode';
@@ -146,7 +145,6 @@ const GameView = () => {
   const [guesses, setGuesses] = useState<Guess[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [status, setStatus] = useState<'playing' | 'cleared'>('playing');
-  const [hintLevel, setHintLevel] = useState(1);
   const [feedback, setFeedback] = useState<{ tone: FeedbackTone; text: string } | null>(null);
   const [solvedTerms, setSolvedTerms] = useState<string[]>([]);
   const [stats, setStats] = useState<PlayerStats>(() => createDefaultStats());
@@ -187,14 +185,12 @@ const GameView = () => {
 
   const hints = useMemo(
     () => [
-      { label: '글자 수', value: `${currentEntry.term.length} 글자` },
-      { label: '카테고리', value: currentEntry.category },
-      { label: '추가 힌트', value: currentEntry.hint },
+      { label: '글자 수', value: `${currentEntry.term.length} 글자`, unlockAt: 0 },
+      { label: '카테고리', value: currentEntry.category, unlockAt: 10 },
+      { label: '추가 힌트', value: currentEntry.hint, unlockAt: 20 },
     ],
     [currentEntry],
   );
-
-  const displayedHints = hints.slice(0, hintLevel);
 
   const bestBreakdown = useMemo(() => {
     if (guesses.length === 0) {
@@ -271,7 +267,6 @@ const GameView = () => {
     setGuesses([]);
     setInputValue('');
     setStatus('playing');
-    setHintLevel(1);
     setFeedback(null);
   };
 
@@ -339,12 +334,6 @@ const GameView = () => {
         }
         return next;
       });
-    }
-  };
-
-  const revealHint = () => {
-    if (hintLevel < MAX_HINT_LEVEL) {
-      setHintLevel((prev) => Math.min(prev + 1, MAX_HINT_LEVEL));
     }
   };
 
@@ -497,28 +486,40 @@ const GameView = () => {
             <div className="space-y-3 pt-2">
               <div className="flex items-center justify-between gap-4">
                 <h2 className="text-sm font-semibold text-slate-200">힌트 패널</h2>
-                <button
-                  type="button"
-                  onClick={revealHint}
-                  disabled={hintLevel >= MAX_HINT_LEVEL || status === 'cleared'}
-                  className="inline-flex h-9 items-center justify-center rounded-full border border-indigo-400/40 bg-indigo-500/10 px-4 text-xs font-medium text-indigo-100 transition hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {hintLevel >= MAX_HINT_LEVEL ? '힌트 모두 열람' : '힌트 추가 공개'}
-                </button>
+                <p className="text-xs font-medium text-indigo-200/70">
+                  {guesses.length}회 시도
+                </p>
               </div>
 
               <ul className="grid gap-3">
-                {displayedHints.map((hint) => (
-                  <li
-                    key={hint.label}
-                    className="rounded-2xl border border-border/70 bg-muted/60 px-4 py-3 text-left text-sm text-slate-200 shadow-subtle"
-                  >
-                    <p className="text-xs font-semibold uppercase tracking-widest text-indigo-200/70">
-                      {hint.label}
-                    </p>
-                    <p className="mt-1 text-base text-slate-100">{hint.value}</p>
-                  </li>
-                ))}
+                {hints.map((hint) => {
+                  const isUnlocked = guesses.length >= hint.unlockAt;
+                  return (
+                    <li
+                      key={hint.label}
+                      className={cn(
+                        'rounded-2xl border px-4 py-3 text-left text-sm shadow-subtle',
+                        isUnlocked
+                          ? 'border-border/70 bg-muted/60 text-slate-200'
+                          : 'border-slate-700/50 bg-slate-900/40 text-slate-500',
+                      )}
+                    >
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-200/70">
+                          {hint.label}
+                        </p>
+                        {!isUnlocked && (
+                          <p className="text-xs text-slate-500">
+                            {hint.unlockAt}회 시도 시 공개
+                          </p>
+                        )}
+                      </div>
+                      <p className={cn('mt-1 text-base', isUnlocked ? 'text-slate-100' : 'text-slate-600')}>
+                        {isUnlocked ? hint.value : '🔒 잠김'}
+                      </p>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           </div>
